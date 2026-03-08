@@ -6,6 +6,17 @@
 
 The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
 
+## Fork notes
+
+This fork keeps the original small-repo / single-mutable-file idea, but adds a few practical changes for local research use:
+
+- better default behavior on non-Hopper NVIDIA GPUs via a safer attention fallback path
+- a small `log_result.py` helper for appending completed runs to `results.tsv`
+- clearer `program.md` setup instructions for branch-based experiment flow and local result logging
+- a README that treats the repo as a reusable research-loop sandbox, not only an H100 demo
+
+The goal of this fork is still to stay close to upstream in shape and spirit, while being easier to run and inspect on consumer hardware.
+
 ## How it works
 
 The repo is deliberately kept small and only really has a few files that matter:
@@ -39,9 +50,9 @@ uv run train.py
 python log_result.py --log run.log --status keep --description "baseline"
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+If the above commands all work, your setup is working and you can go into autonomous research mode.
 
-**Platform support.** This code still assumes a single NVIDIA GPU, but the repo is more usable on non-Hopper cards now. Hardware-sensitive settings live near the top of `train.py`, and a few of them can also be overridden through env vars such as `AR_DEVICE_BATCH_SIZE`, `AR_TOTAL_BATCH_SIZE`, `AR_DEPTH`, and `AR_COMPILE`. The fixed evaluation harness is still GPU-only.
+**Platform support.** This code still assumes a single NVIDIA GPU, but this fork is more usable on non-Hopper cards than upstream. Hardware-sensitive settings live near the top of `train.py`, and a few of them can also be overridden through env vars such as `AR_DEVICE_BATCH_SIZE`, `AR_TOTAL_BATCH_SIZE`, `AR_DEPTH`, and `AR_COMPILE`. The fixed evaluation harness is still GPU-only.
 
 ## Reusable lab pattern
 
@@ -71,6 +82,7 @@ The `program.md` file is essentially a super lightweight "skill".
 prepare.py      — constants, data prep + runtime utilities (do not modify)
 train.py        — model, optimizer, training loop (agent modifies this)
 program.md      — agent instructions
+log_result.py   — append run summaries to results.tsv
 pyproject.toml  — dependencies
 ```
 
