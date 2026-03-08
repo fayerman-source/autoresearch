@@ -8,17 +8,18 @@ The idea: give an AI agent a small but real LLM training setup and let it experi
 
 ## How it works
 
-The repo is deliberately kept small and only really has a three files that matter:
+The repo is deliberately kept small and only really has a few files that matter:
 
 - **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+- **`log_result.py`** — tiny helper that appends a completed run to `results.tsv`.
 
 By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** A single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/).
 
 ```bash
 
@@ -33,11 +34,26 @@ uv run prepare.py
 
 # 4. Manually run a single training experiment (~5 min)
 uv run train.py
+
+# 5. Append the run summary to the experiment ledger
+python log_result.py --log run.log --status keep --description "baseline"
 ```
 
 If the above commands all work ok, your setup is working and you can go into autonomous research mode.
 
-**Platforms support**. This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. The code is just a demonstration and I don't know how much I'll support it going forward. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+**Platform support.** This code still assumes a single NVIDIA GPU, but the repo is more usable on non-Hopper cards now. Hardware-sensitive settings live near the top of `train.py`, and a few of them can also be overridden through env vars such as `AR_DEVICE_BATCH_SIZE`, `AR_TOTAL_BATCH_SIZE`, `AR_DEPTH`, and `AR_COMPILE`. The fixed evaluation harness is still GPU-only.
+
+## Reusable lab pattern
+
+The most reusable idea in this repo is not "train this exact GPT", it is the loop shape:
+
+1. keep one mutable target (`train.py`)
+2. keep one fixed evaluation harness (`prepare.py`)
+3. run on a fixed time budget
+4. record a compact summary
+5. keep or discard based on the summary
+
+That pattern can transfer to future research sandboxes even if the mutable target stops being a training script.
 
 ## Running the agent
 
