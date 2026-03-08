@@ -2,9 +2,13 @@
 
 Autonomous experiment loop for a small single-GPU language-model training setup.
 
-This fork stays close to `karpathy/autoresearch` in shape, but it is documented and tuned to be easier to run on mainstream NVIDIA cards instead of assuming Hopper-class hardware.
+This fork stays close to `karpathy/autoresearch` in shape, but it is easier to run on mainstream NVIDIA cards instead of assuming Hopper-class hardware.
 
 ![Autonomous Research Loop](autoresearch_loop.jpg)
+
+## Why This Fork Exists
+
+If you're trying to run `autoresearch` on a normal local NVIDIA GPU, the upstream defaults may not work cleanly as-is. This fork keeps the original small-loop idea, but smooths out the first-run path for consumer cards with a safer attention fallback, small runtime presets, and clearer operator docs.
 
 ## What This Repo Is
 
@@ -56,8 +60,8 @@ uv sync
 # one-time data/tokenizer prep
 uv run prepare.py
 
-# run one baseline experiment
-uv run train.py
+# run one safer baseline experiment for consumer GPUs
+AR_PRESET=12gb uv run train.py
 
 # append the summary from the run log to the ledger
 python log_result.py --log run.log --status keep --description "baseline"
@@ -67,7 +71,7 @@ If those commands work, the repo is ready for manual or agent-driven iteration.
 
 ## Consumer GPU Presets
 
-This fork supports a small preset layer so you can start from safer defaults without editing source.
+This fork supports a small preset layer so people on weaker GPUs can get to a working first run without editing source.
 
 Available presets:
 
@@ -108,10 +112,10 @@ This repo still assumes a single CUDA GPU and a short fixed-time training run. O
 
 A few practical notes:
 
-- first runs may still fail if your card is tighter on VRAM than expected
-- `AR_PRESET=12gb` is the recommended starting point for 12 GB cards
+- start with `AR_PRESET=12gb` on 12 GB cards
 - if compilation is slow or unstable, keep `AR_COMPILE=0`
 - if VRAM is tight, lower `AR_DEVICE_BATCH_SIZE` first
+- this fork is meant to be easier to start, not universally portable
 
 ## Agent Loop
 
