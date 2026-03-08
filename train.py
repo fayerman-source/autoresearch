@@ -45,6 +45,13 @@ def getenv_bool(name, default):
         return default
     return value.lower() in {"1", "true", "yes", "on"}
 
+
+def preset_value(name, default, presets):
+    preset_name = os.getenv("AR_PRESET", "").strip().lower()
+    if not preset_name:
+        return default
+    return presets.get(preset_name, {}).get(name, default)
+
 # ---------------------------------------------------------------------------
 # GPT Model
 # ---------------------------------------------------------------------------
@@ -469,13 +476,31 @@ class MuonAdamW(torch.optim.Optimizer):
 # Experiment surface
 # ---------------------------------------------------------------------------
 
+PRESET_NAME = os.getenv("AR_PRESET", "").strip().lower()
+
 # Model architecture
-ASPECT_RATIO = getenv_int("AR_ASPECT_RATIO", 64)        # model_dim = depth * ASPECT_RATIO
-HEAD_DIM = getenv_int("AR_HEAD_DIM", 128)               # target head dimension for attention
-WINDOW_PATTERN = getenv_str("AR_WINDOW_PATTERN", "SSSL") # L=full, S=half context
+ASPECT_RATIO = getenv_int("AR_ASPECT_RATIO", preset_value("aspect_ratio", 64, {
+    "8gb": {"aspect_ratio": 48},
+    "12gb": {"aspect_ratio": 64},
+    "h100": {"aspect_ratio": 64},
+}))         # model_dim = depth * ASPECT_RATIO
+HEAD_DIM = getenv_int("AR_HEAD_DIM", preset_value("head_dim", 128, {
+    "8gb": {"head_dim": 128},
+    "12gb": {"head_dim": 128},
+    "h100": {"head_dim": 128},
+}))               # target head dimension for attention
+WINDOW_PATTERN = getenv_str("AR_WINDOW_PATTERN", preset_value("window_pattern", "SSSL", {
+    "8gb": {"window_pattern": "SSSL"},
+    "12gb": {"window_pattern": "SSSL"},
+    "h100": {"window_pattern": "SSSL"},
+})) # L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = getenv_int("AR_TOTAL_BATCH_SIZE", 2**16) # global tokens / optimizer step
+TOTAL_BATCH_SIZE = getenv_int("AR_TOTAL_BATCH_SIZE", preset_value("total_batch_size", 2**16, {
+    "8gb": {"total_batch_size": 2**15},
+    "12gb": {"total_batch_size": 2**15},
+    "h100": {"total_batch_size": 2**16},
+})) # global tokens / optimizer step
 EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
@@ -487,11 +512,23 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = getenv_int("AR_DEPTH", 8)                # number of transformer layers
-DEVICE_BATCH_SIZE = getenv_int("AR_DEVICE_BATCH_SIZE", 8)  # 12 GB-friendly default
+DEPTH = getenv_int("AR_DEPTH", preset_value("depth", 8, {
+    "8gb": {"depth": 6},
+    "12gb": {"depth": 8},
+    "h100": {"depth": 8},
+}))                # number of transformer layers
+DEVICE_BATCH_SIZE = getenv_int("AR_DEVICE_BATCH_SIZE", preset_value("device_batch_size", 8, {
+    "8gb": {"device_batch_size": 2},
+    "12gb": {"device_batch_size": 4},
+    "h100": {"device_batch_size": 8},
+}))  # per-device microbatch size
 
 # Platform controls
-COMPILE_MODEL = getenv_bool("AR_COMPILE", True)
+COMPILE_MODEL = getenv_bool("AR_COMPILE", preset_value("compile_model", True, {
+    "8gb": {"compile_model": False},
+    "12gb": {"compile_model": False},
+    "h100": {"compile_model": True},
+}))
 ATTN_BACKEND = "flash-attn3" if USE_FLASH_ATTN3 else "sdpa"
 PEAK_FLOPS = float(os.getenv("AR_PEAK_FLOPS", "989.5e12"))
 
@@ -509,7 +546,11 @@ autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
+if PRESET_NAME:
+    print(f"Preset: {PRESET_NAME}")
 print(f"Attention backend: {ATTN_BACKEND}")
+if not USE_FLASH_ATTN3:
+    print(f"Flash Attention 3 disabled for compute capability {cap}; using PyTorch SDPA.")
 print(f"Torch compile: {COMPILE_MODEL}")
 print(f"Device batch size: {DEVICE_BATCH_SIZE}")
 print(f"Total batch size: {TOTAL_BATCH_SIZE}")

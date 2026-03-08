@@ -1,98 +1,150 @@
 # autoresearch
 
+Autonomous experiment loop for a small single-GPU language-model training setup.
+
+This fork stays close to `karpathy/autoresearch` in shape, but it is documented and tuned to be easier to run on mainstream NVIDIA cards instead of assuming Hopper-class hardware.
+
 ![teaser](progress.png)
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+## What This Repo Is
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+The loop is intentionally small:
 
-## Fork notes
+- one mutable target: `train.py`
+- one fixed evaluation harness: `prepare.py`
+- one fixed run budget: 5 minutes
+- one scalar outcome: `val_bpb` (lower is better)
+- one ledger: `results.tsv`
 
-This fork keeps the original small-repo / single-mutable-file idea, but adds a few practical changes for local research use:
+The point is not to preserve this exact training recipe forever. The useful pattern is the keep/discard experiment loop under a fixed evaluation harness.
 
-- better default behavior on non-Hopper NVIDIA GPUs via a safer attention fallback path
-- a small `log_result.py` helper for appending completed runs to `results.tsv`
-- clearer `program.md` setup instructions for branch-based experiment flow and local result logging
-- a README that treats the repo as a reusable research-loop sandbox, not only an H100 demo
+## What This Fork Changes
 
-The goal of this fork is still to stay close to upstream in shape and spirit, while being easier to run and inspect on consumer hardware.
+Compared with upstream, this fork adds a few practical changes for local research use:
 
-## How it works
+- safer attention fallback on non-Hopper NVIDIA GPUs
+- optional consumer-GPU presets through `AR_PRESET`
+- clearer run logging and startup output
+- `log_result.py` for appending completed runs to `results.tsv`
+- more direct operator docs in `README.md` and `program.md`
 
-The repo is deliberately kept small and only really has a few files that matter:
+## Requirements
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
-- **`log_result.py`** — tiny helper that appends a completed run to `results.tsv`.
+- Linux
+- one NVIDIA GPU
+- Python 3.10+
+- [`uv`](https://docs.astral.sh/uv/)
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+This repo is still GPU-only. It is not intended for CPU training or broad multi-platform support.
 
-## Quick start
+## Files That Matter
 
-**Requirements:** A single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/).
+- `prepare.py`: data prep, tokenizer training, dataloaders, fixed eval utilities
+- `train.py`: model, optimizer, training loop, experiment surface
+- `program.md`: baseline instructions for an autonomous agent
+- `log_result.py`: append a completed run summary to `results.tsv`
+- `pyproject.toml`: dependencies
+
+## Quick Start
 
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install dependencies
+# install dependencies
 uv sync
 
-# 3. Download data and train tokenizer (one-time, ~2 min)
+# one-time data/tokenizer prep
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
+# run one baseline experiment
 uv run train.py
 
-# 5. Append the run summary to the experiment ledger
+# append the summary from the run log to the ledger
 python log_result.py --log run.log --status keep --description "baseline"
 ```
 
-If the above commands all work, your setup is working and you can go into autonomous research mode.
+If those commands work, the repo is ready for manual or agent-driven iteration.
 
-**Platform support.** This code still assumes a single NVIDIA GPU, but this fork is more usable on non-Hopper cards than upstream. Hardware-sensitive settings live near the top of `train.py`, and a few of them can also be overridden through env vars such as `AR_DEVICE_BATCH_SIZE`, `AR_TOTAL_BATCH_SIZE`, `AR_DEPTH`, and `AR_COMPILE`. The fixed evaluation harness is still GPU-only.
+## Consumer GPU Presets
 
-## Reusable lab pattern
+This fork supports a small preset layer so you can start from safer defaults without editing source.
 
-The most reusable idea in this repo is not "train this exact GPT", it is the loop shape:
+Available presets:
 
-1. keep one mutable target (`train.py`)
-2. keep one fixed evaluation harness (`prepare.py`)
+- `AR_PRESET=8gb`: smaller microbatch, smaller total batch, compile disabled
+- `AR_PRESET=12gb`: safer defaults for cards like a 12 GB RTX 5070, compile disabled
+- `AR_PRESET=h100`: keeps the higher-throughput defaults closer to upstream assumptions
+
+Examples:
+
+```bash
+# safer first run on a 12 GB card
+AR_PRESET=12gb uv run train.py
+
+# even smaller run shape for tighter VRAM budgets
+AR_PRESET=8gb uv run train.py
+
+# override any preset explicitly
+AR_PRESET=12gb AR_DEVICE_BATCH_SIZE=2 AR_TOTAL_BATCH_SIZE=16384 uv run train.py
+```
+
+Environment variables supported by `train.py`:
+
+- `AR_PRESET`
+- `AR_ASPECT_RATIO`
+- `AR_HEAD_DIM`
+- `AR_WINDOW_PATTERN`
+- `AR_DEPTH`
+- `AR_DEVICE_BATCH_SIZE`
+- `AR_TOTAL_BATCH_SIZE`
+- `AR_COMPILE`
+- `AR_PEAK_FLOPS`
+
+Precedence is simple: explicit `AR_*` values override the preset.
+
+## Expected Behavior On Consumer GPUs
+
+This repo still assumes a single CUDA GPU and a short fixed-time training run. On non-Hopper GPUs, the fork falls back from Flash Attention 3 to PyTorch SDPA automatically and prints that choice at startup.
+
+A few practical notes:
+
+- first runs may still fail if your card is tighter on VRAM than expected
+- `AR_PRESET=12gb` is the recommended starting point for 12 GB cards
+- if compilation is slow or unstable, keep `AR_COMPILE=0`
+- if VRAM is tight, lower `AR_DEVICE_BATCH_SIZE` first
+
+## Agent Loop
+
+The reusable idea here is the loop shape:
+
+1. keep one mutable file
+2. keep the evaluation harness fixed
 3. run on a fixed time budget
 4. record a compact summary
-5. keep or discard based on the summary
+5. keep or discard based on the result
 
-That pattern can transfer to future research sandboxes even if the mutable target stops being a training script.
+`program.md` contains the baseline agent instructions for that loop.
 
-## Running the agent
+## Project Structure
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
-
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
-
-The `program.md` file is essentially a super lightweight "skill".
-
-## Project structure
-
-```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-log_result.py   — append run summaries to results.tsv
-pyproject.toml  — dependencies
+```text
+prepare.py      fixed data prep and evaluation utilities
+train.py        mutable experiment surface
+program.md      agent instructions
+log_result.py   append summaries to results.tsv
+pyproject.toml  dependencies
+results.tsv     experiment ledger
 ```
 
-## Design choices
+## Design Constraints
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+- single machine
+- single NVIDIA GPU
+- short runs over maximum throughput
+- inspectable code over configuration sprawl
+- minimal dependencies
 
-## Notable forks
+If you need distributed training, broad hardware portability, or a larger experiment platform, this repo is the wrong base.
+
+## Notable Forks
 
 - [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos)
 - [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx)
