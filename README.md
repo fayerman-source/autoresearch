@@ -4,7 +4,7 @@ Autonomous experiment loop for a small single-GPU language-model training setup.
 
 This fork stays close to `karpathy/autoresearch` in shape, but it is documented and tuned to be easier to run on mainstream NVIDIA cards instead of assuming Hopper-class hardware.
 
-![teaser](progress.png)
+![Autonomous Research Loop](autoresearch_loop.jpg)
 
 ## What This Repo Is
 
@@ -19,6 +19,8 @@ The loop is intentionally small:
 The point is not to preserve this exact training recipe forever. The useful pattern is the keep/discard experiment loop under a fixed evaluation harness.
 
 ## What This Fork Changes
+
+![Upstream vs This Fork](autoresearch_gpu_comparison.jpg)
 
 Compared with upstream, this fork adds a few practical changes for local research use:
 
