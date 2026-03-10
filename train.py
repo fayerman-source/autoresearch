@@ -52,6 +52,38 @@ def preset_value(name, default, presets):
         return default
     return presets.get(preset_name, {}).get(name, default)
 
+
+def get_device_peak_flops():
+    override = os.getenv("AR_PEAK_FLOPS")
+    if override is not None:
+        return float(override), "AR_PEAK_FLOPS"
+
+    device_name = torch.cuda.get_device_name()
+    cap = torch.cuda.get_device_capability()
+    name_upper = device_name.upper()
+
+    # Keep this mapping small and operational: enough to avoid reporting H100
+    # MFU on clearly different RTX/A100-class cards without adding a full db.
+    if cap == (10, 0) or "B200" in name_upper or "B100" in name_upper:
+        return 2250e12, "auto:blackwell-datacenter"
+    if cap == (12, 0):
+        return 988e12, "auto:blackwell-rtx"
+    if cap == (9, 0):
+        return 989.5e12, "auto:hopper"
+    if "A100" in name_upper:
+        return 312e12, "auto:a100"
+    if "RTX 4090" in name_upper:
+        return 330e12, "auto:rtx4090"
+    if "RTX 4080" in name_upper:
+        return 242e12, "auto:rtx4080"
+    if "RTX 3090" in name_upper:
+        return 142e12, "auto:rtx3090"
+    if "RTX 3080" in name_upper:
+        return 119e12, "auto:rtx3080"
+    if "RTX 3070" in name_upper:
+        return 81e12, "auto:rtx3070"
+    return 989.5e12, "fallback:h100"
+
 # ---------------------------------------------------------------------------
 # GPT Model
 # ---------------------------------------------------------------------------
@@ -188,7 +220,7 @@ class GPT(nn.Module):
             for i in range(config.n_layer) if has_ve(i, config.n_layer)
         })
         # Rotary embeddings
-        self.rotary_seq_len = config.sequence_len * 10
+        self.rotary_seq_len = config.sequence_len
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -530,7 +562,7 @@ COMPILE_MODEL = getenv_bool("AR_COMPILE", preset_value("compile_model", True, {
     "h100": {"compile_model": True},
 }))
 ATTN_BACKEND = "flash-attn3" if USE_FLASH_ATTN3 else "sdpa"
-PEAK_FLOPS = float(os.getenv("AR_PEAK_FLOPS", "989.5e12"))
+PEAK_FLOPS, PEAK_FLOPS_SOURCE = get_device_peak_flops()
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -545,9 +577,13 @@ autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
+device_name = torch.cuda.get_device_name()
 print(f"Vocab size: {vocab_size:,}")
 if PRESET_NAME:
     print(f"Preset: {PRESET_NAME}")
+print(f"GPU: {device_name}")
+print(f"Compute capability: {cap}")
+print(f"Peak FLOPS: {PEAK_FLOPS / 1e12:.1f} TFLOPS ({PEAK_FLOPS_SOURCE})")
 print(f"Attention backend: {ATTN_BACKEND}")
 if not USE_FLASH_ATTN3:
     print(f"Flash Attention 3 disabled for compute capability {cap}; using PyTorch SDPA.")
@@ -665,7 +701,7 @@ while True:
     t1 = time.perf_counter()
     dt = t1 - t0
 
-    if step > 10:
+    if step >= 10:
         total_training_time += dt
 
     # Logging
