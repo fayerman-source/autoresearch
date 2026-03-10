@@ -102,20 +102,23 @@ Environment variables supported by `train.py`:
 - `AR_DEVICE_BATCH_SIZE`
 - `AR_TOTAL_BATCH_SIZE`
 - `AR_COMPILE`
-- `AR_PEAK_FLOPS`
+- `AR_PEAK_FLOPS` - optional manual override for peak FLOPS if auto-detection is wrong or you want fixed MFU reporting
 
 Precedence is simple: explicit `AR_*` values override the preset.
 
 ## Expected Behavior On Consumer GPUs
 
-This repo still assumes a single CUDA GPU and a short fixed-time training run. On non-Hopper GPUs, the fork falls back from Flash Attention 3 to PyTorch SDPA automatically and prints that choice at startup.
+This repo still assumes a single CUDA GPU and a short fixed-time training run. On non-Hopper GPUs, the fork falls back from Flash Attention 3 to PyTorch SDPA automatically and prints that choice at startup. The startup summary also prints the detected GPU name, compute capability, and peak FLOPS source used for MFU reporting.
 
 A few practical notes:
 
 - start with `AR_PRESET=12gb` on 12 GB cards
 - if compilation is slow or unstable, keep `AR_COMPILE=0`
 - if VRAM is tight, lower `AR_DEVICE_BATCH_SIZE` first
+- `AR_PEAK_FLOPS` can be used to override the detected peak FLOPS if needed
 - this fork is meant to be easier to start, not universally portable
+
+This path has been validated on an RTX 5070 12 GB setup.
 
 ## Agent Loop
 
