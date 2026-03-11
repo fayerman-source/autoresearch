@@ -1,0 +1,6 @@
+commit	val_bpb	memory_gb	status	description
+5dcd77d	1.269448	3.4	keep	baseline
+5dcd77d	1.189742	3.3	keep	window_L
+5dcd77d	1.187303	3.3	keep	window_L_warmdown_075
+5dcd77d	1.183502	3.3	keep	window_L_warmdown_075_final_005
+5dcd77d	1.184761	3.3	discard	window_L_warmdown_075_final_005_targeted_wd

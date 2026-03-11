@@ -60,7 +60,7 @@ uv sync
 # one-time data/tokenizer prep
 uv run prepare.py
 
-# run one safer baseline experiment for consumer GPUs
+# run the tuned 12 GB baseline used for the latest RTX 5070 validation
 AR_PRESET=12gb uv run train.py
 
 # append the summary from the run log to the ledger
@@ -76,13 +76,13 @@ This fork supports a small preset layer so people on weaker GPUs can get to a wo
 Available presets:
 
 - `AR_PRESET=8gb`: smaller microbatch, smaller total batch, compile disabled
-- `AR_PRESET=12gb`: safer defaults for cards like a 12 GB RTX 5070, compile disabled
+- `AR_PRESET=12gb`: validated RTX 5070-style defaults, compile disabled, `WINDOW_PATTERN=L`, `WARMDOWN_RATIO=0.75`, `FINAL_LR_FRAC=0.05`
 - `AR_PRESET=h100`: keeps the higher-throughput defaults closer to upstream assumptions
 
 Examples:
 
 ```bash
-# safer first run on a 12 GB card
+# tuned first run on a 12 GB card
 AR_PRESET=12gb uv run train.py
 
 # even smaller run shape for tighter VRAM budgets
@@ -102,19 +102,37 @@ Environment variables supported by `train.py`:
 - `AR_DEVICE_BATCH_SIZE`
 - `AR_TOTAL_BATCH_SIZE`
 - `AR_COMPILE`
+- `AR_WARMDOWN_RATIO`
+- `AR_FINAL_LR_FRAC`
+- `AR_EMBEDDING_WEIGHT_DECAY`
+- `AR_VALUE_EMBED_WEIGHT_DECAY`
+- `AR_LM_HEAD_WEIGHT_DECAY`
 - `AR_PEAK_FLOPS` - optional manual override for peak FLOPS if auto-detection is wrong or you want fixed MFU reporting
 
 Precedence is simple: explicit `AR_*` values override the preset.
 
+The current best known 12 GB config from the fixed 5-minute RTX 5070 run is exactly the preset:
+
+```bash
+AR_PRESET=12gb uv run train.py
+```
+
+Equivalent explicit settings:
+
+```bash
+AR_WINDOW_PATTERN=L AR_WARMDOWN_RATIO=0.75 AR_FINAL_LR_FRAC=0.05 uv run train.py
+```
+
 ## Expected Behavior On Consumer GPUs
 
-This repo still assumes a single CUDA GPU and a short fixed-time training run. On non-Hopper GPUs, the fork falls back from Flash Attention 3 to PyTorch SDPA automatically and prints that choice at startup. The startup summary also prints the detected GPU name, compute capability, and peak FLOPS source used for MFU reporting.
+This repo still assumes a single CUDA GPU and a short fixed-time training run. On non-Hopper GPUs, the fork falls back from Flash Attention 3 to PyTorch SDPA automatically and prints that choice at startup. The SDPA path now reuses precomputed sliding-window masks instead of rebuilding them every forward pass. The startup summary also prints the detected GPU name, compute capability, and peak FLOPS source used for MFU reporting.
 
 A few practical notes:
 
 - start with `AR_PRESET=12gb` on 12 GB cards
 - if compilation is slow or unstable, keep `AR_COMPILE=0`
 - if VRAM is tight, lower `AR_DEVICE_BATCH_SIZE` first
+- the fork now uses the validated `L` window pattern and longer warmdown by default for the `12gb` preset
 - `AR_PEAK_FLOPS` can be used to override the detected peak FLOPS if needed
 - this fork is meant to be easier to start, not universally portable
 

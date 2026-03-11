@@ -117,21 +117,19 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
-def run_attention(q, k, v, window_size):
+def make_sliding_window_mask(seq_len, left_window, device):
+    q_idx = torch.arange(seq_len, device=device)[:, None]
+    k_idx = torch.arange(seq_len, device=device)[None, :]
+    return (k_idx <= q_idx) & (k_idx >= q_idx - (left_window - 1))
+
+
+def run_attention(q, k, v, window_size, attn_mask=None):
     if USE_FLASH_ATTN3:
         return fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
 
     q = q.transpose(1, 2)
     k = k.transpose(1, 2)
     v = v.transpose(1, 2)
-
-    attn_mask = None
-    left_window = window_size[0]
-    if left_window < q.size(2):
-        t = q.size(2)
-        q_idx = torch.arange(t, device=q.device)[:, None]
-        k_idx = torch.arange(t, device=q.device)[None, :]
-        attn_mask = (k_idx <= q_idx) & (k_idx >= q_idx - (left_window - 1))
 
     y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=attn_mask is None)
     return y.transpose(1, 2)
@@ -153,7 +151,7 @@ class CausalSelfAttention(nn.Module):
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
-    def forward(self, x, ve, cos_sin, window_size):
+    def forward(self, x, ve, cos_sin, window_size, attn_mask):
         B, T, C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -169,7 +167,7 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = run_attention(q, k, v, window_size)
+        y = run_attention(q, k, v, window_size, attn_mask=attn_mask)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -194,8 +192,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
+    def forward(self, x, ve, cos_sin, window_size, attn_mask):
+        x = x + self.attn(norm(x), ve, cos_sin, window_size, attn_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -205,6 +203,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.window_sizes = self._compute_window_sizes(config)
+        self.sdpa_mask_names = self._build_sdpa_mask_names()
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
@@ -224,6 +223,10 @@ class GPT(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
+        if not USE_FLASH_ATTN3:
+            for mask_name, left_window in self.sdpa_mask_names.items():
+                mask = make_sliding_window_mask(config.sequence_len, left_window, device="cpu")
+                self.register_buffer(mask_name, mask, persistent=False)
 
     @torch.no_grad()
     def init_weights(self):
@@ -284,6 +287,25 @@ class GPT(nn.Module):
         window_sizes[-1] = (long_window, 0)
         return window_sizes
 
+    def _build_sdpa_mask_names(self):
+        mask_names = {}
+        if USE_FLASH_ATTN3:
+            return mask_names
+        for left_window, _ in self.window_sizes:
+            if left_window < self.config.sequence_len:
+                mask_names[f"sdpa_mask_{left_window}"] = left_window
+        return mask_names
+
+    def _get_sdpa_attn_mask(self, window_size, seq_len):
+        if USE_FLASH_ATTN3:
+            return None
+        left_window = window_size[0]
+        if left_window >= self.config.sequence_len or left_window >= seq_len:
+            return None
+        mask_name = f"sdpa_mask_{left_window}"
+        mask = getattr(self, mask_name)
+        return mask[:seq_len, :seq_len]
+
     def estimate_flops(self):
         """Estimated FLOPs per token (forward + backward)."""
         nparams = sum(p.numel() for p in self.parameters())
@@ -313,7 +335,9 @@ class GPT(nn.Module):
         }
 
     def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02,
-                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5):
+                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5,
+                        embedding_weight_decay=0.0, value_embed_weight_decay=0.0,
+                        lm_head_weight_decay=0.0):
         model_dim = self.config.n_embd
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
@@ -327,9 +351,9 @@ class GPT(nn.Module):
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         print(f"Scaling AdamW LRs by 1/sqrt({model_dim}/768) = {dmodel_lr_scale:.6f}")
         param_groups = [
-            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=lm_head_weight_decay),
+            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=embedding_weight_decay),
+            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=value_embed_weight_decay),
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
         ]
@@ -355,7 +379,8 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i])
+            attn_mask = self._get_sdpa_attn_mask(self.window_sizes[i], T)
+            x = block(x, ve, cos_sin, self.window_sizes[i], attn_mask)
         x = norm(x)
 
         softcap = 15
@@ -523,7 +548,7 @@ HEAD_DIM = getenv_int("AR_HEAD_DIM", preset_value("head_dim", 128, {
 }))               # target head dimension for attention
 WINDOW_PATTERN = getenv_str("AR_WINDOW_PATTERN", preset_value("window_pattern", "SSSL", {
     "8gb": {"window_pattern": "SSSL"},
-    "12gb": {"window_pattern": "SSSL"},
+    "12gb": {"window_pattern": "L"},
     "h100": {"window_pattern": "SSSL"},
 })) # L=full, S=half context
 
@@ -538,10 +563,21 @@ UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5         # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2      # cautious weight decay for Muon
+EMBEDDING_WEIGHT_DECAY = float(os.getenv("AR_EMBEDDING_WEIGHT_DECAY", "0.0"))
+VALUE_EMBED_WEIGHT_DECAY = float(os.getenv("AR_VALUE_EMBED_WEIGHT_DECAY", "0.0"))
+LM_HEAD_WEIGHT_DECAY = float(os.getenv("AR_LM_HEAD_WEIGHT_DECAY", "0.0"))
 ADAM_BETAS = (0.8, 0.95) # Adam beta1, beta2
 WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
-FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
+WARMDOWN_RATIO = float(os.getenv("AR_WARMDOWN_RATIO", str(preset_value("warmdown_ratio", 0.5, {
+    "8gb": {"warmdown_ratio": 0.5},
+    "12gb": {"warmdown_ratio": 0.75},
+    "h100": {"warmdown_ratio": 0.5},
+}))))    # fraction of time budget for LR warmdown
+FINAL_LR_FRAC = float(os.getenv("AR_FINAL_LR_FRAC", str(preset_value("final_lr_frac", 0.0, {
+    "8gb": {"final_lr_frac": 0.0},
+    "12gb": {"final_lr_frac": 0.05},
+    "h100": {"final_lr_frac": 0.0},
+}))))     # final LR as fraction of initial
 
 # Model size
 DEPTH = getenv_int("AR_DEPTH", preset_value("depth", 8, {
@@ -590,6 +626,9 @@ if not USE_FLASH_ATTN3:
 print(f"Torch compile: {COMPILE_MODEL}")
 print(f"Device batch size: {DEVICE_BATCH_SIZE}")
 print(f"Total batch size: {TOTAL_BATCH_SIZE}")
+print(f"Warmdown ratio: {WARMDOWN_RATIO}")
+print(f"Final LR frac: {FINAL_LR_FRAC}")
+print(f"AdamW decay (embed/ve/lm_head): {EMBEDDING_WEIGHT_DECAY}/{VALUE_EMBED_WEIGHT_DECAY}/{LM_HEAD_WEIGHT_DECAY}")
 
 def build_model_config(depth):
     base_dim = depth * ASPECT_RATIO
@@ -628,6 +667,9 @@ optimizer = model.setup_optimizer(
     adam_betas=ADAM_BETAS,
     matrix_lr=MATRIX_LR,
     weight_decay=WEIGHT_DECAY,
+    embedding_weight_decay=EMBEDDING_WEIGHT_DECAY,
+    value_embed_weight_decay=VALUE_EMBED_WEIGHT_DECAY,
+    lm_head_weight_decay=LM_HEAD_WEIGHT_DECAY,
 )
 
 if COMPILE_MODEL:
